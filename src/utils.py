@@ -1,29 +1,25 @@
 import logging
-import pathlib
 import requests
-import cloudflare
 
-from typing import List
-from colorlogs import ColoredLevelFormatter
-
-logging.getLogger().setLevel(logging.INFO)
-formatter = ColoredLevelFormatter("%(levelname)s: %(message)s")
-console = logging.StreamHandler()
-console.setFormatter(ColoredLevelFormatter("%(levelname)s: %(message)s"))
-logger = logging.getLogger()
-logger.addHandler(console)
+from typing import List, Set
+from src import cloudflare
 
 class App:
-    def __init__(self, adlist_name: str, adlist_urls: List[str]):
+    def __init__(self, adlist_name: str, adlist_urls: List[str],whitelist_urls: List[str]):
         self.adlist_name = adlist_name
         self.adlist_urls = adlist_urls
+        self.whitelist_urls = whitelist_urls
         self.name_prefix = f"[AdBlock-{adlist_name}]"
 
     def run(self):
         file_content = ""
+        white_content = ""
         for url in self.adlist_urls:
             file_content += self.download_file(url) 
-        domains = self.convert_to_domain_list(file_content) 
+        for url in self.whitelist_urls:
+            white_content += self.download_file(url)
+        white_domains = self.whitelist_handing(white_content)
+        domains = self.convert_to_domain_list(file_content, white_domains)
         
         # check if the list is already in Cloudflare
         cf_lists = cloudflare.get_lists(self.name_prefix)
@@ -84,7 +80,7 @@ class App:
         logging.info(f"File size: {len(r.content)}")
         return r.content.decode("utf-8")
 
-    def convert_to_domain_list(self, file_content: str):
+    def convert_to_domain_list(self, file_content: str, white_domains: Set[str]):
         
         # check if the file is a hosts file or a list of domain
         is_hosts_file = False
@@ -93,7 +89,7 @@ class App:
                 is_hosts_file = True
                 break
     
-        domains = []
+        domains = set()
     
         for line in file_content.splitlines():
             
@@ -106,7 +102,8 @@ class App:
             ]
             if line in skip_lines:
                 continue
-        
+              
+              
             # skip comments and empty lines
             if line.startswith("#") or line == "":
                 continue
@@ -123,25 +120,44 @@ class App:
             else:
                 domain = line.rstrip()
 
-            domains.append(domain)
+            domains.add(domain.encode('idna').decode())
     
         # remove duplicate line
-        domains = sorted(list(set(domains)))
-    
-        logging.info(f"Number of domains: {len(domains)}")
+        logging.info(f"Number of block domains: {len(domains)}")
+
+        # white domains 
+        domains = sorted(list(domains - white_domains))
+        logging.info(f"Number of final domains: {len(domains)}")
     
         return domains
+        
+    def whitelist_handing(self, white_content:str):
+        white_domains = set()
+        for line in white_content.splitlines():
+            if line.startswith("#") or line == "":
+                continue
+            white_domain = line.rstrip()
+
+            white_domains.add(white_domain.encode('idna').decode())
+
+        logging.info(f"Number of white domains: {len(white_domains)}")
+
+        return white_domains
 
     def chunk_list(self, _list: List[str], n: int):
         for i in range(0, len(_list), n):
             yield _list[i : i + n]
 
-if __name__ == "__main__":
-    adlist_urls = [
-        "https://raw.githubusercontent.com/bigdargon/hostsVN/master/option/hosts-VN",
-        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-        "https://raw.githubusercontent.com/luxysiv/hosts/main/hosts.txt"
-    ]
-    adlist_name = "ManhDuong"
-    app = App(adlist_name, adlist_urls)
-    app.run()
+    def delete(self):
+        # Delete gateway policy
+        policy_prefix = f"{self.name_prefix} Block Ads"
+        deleted_policies = cloudflare.delete_gateway_policy(policy_prefix)
+        logging.info(f"Deleted {deleted_policies} gateway policies")
+
+        # Delete lists
+        cf_lists = cloudflare.get_lists(self.name_prefix)
+        for l in cf_lists:
+            logging.info(f"Deleting list {l['name']} - ID:{l['id']} ")
+            cloudflare.delete_list(l["name"], l["id"])
+
+        logging.info("Deletion completed")
