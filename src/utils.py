@@ -1,32 +1,11 @@
 import asyncio
-import logging
-import re
 import aiohttp
+import logging
 
-from src import cloudflare
+from src import cloudflare, convert 
 
-replace_pattern = re.compile(r"(^([0-9.]+|[0-9a-fA-F:.]+)\s+|^(\|\||@@\|\||\*\.|\*))")
-domain_pattern = re.compile(
-    r"^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])"
-    r"(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9]))*$"
-)
-ip_pattern = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
-
-def convert_domains(line):
-    if line.startswith(("#", "!", "/")) or line == "":
-        return None
-
-    linex = line.lower().strip().split("#")[0].split("^")[0].replace("\r", "")
-    domain = replace_pattern.sub("", linex, count=1)
-    try:
-        domain = domain.encode("idna").decode("utf-8", "replace")
-        if domain_pattern.match(domain) and not ip_pattern.match(domain):
-            return domain
-    except Exception:
-        pass
-    return None
-    
 class App:
+    
     def __init__(
         self, adlist_name: str, adlist_urls: list[str], whitelist_urls: list[str]
     ):
@@ -36,16 +15,35 @@ class App:
         self.name_prefix = f"[AdBlock-{adlist_name}]"
 
     async def run(self):
+
+        # Download block and white content 
         async with aiohttp.ClientSession() as session:
-            all_urls = self.adlist_urls + self.whitelist_urls
-            download_tasks = [
-                self.download_file_async(session, url) for url in all_urls
-            ]
-            results = await asyncio.gather(*download_tasks)
-            block_content = "".join(results[:len(self.adlist_urls)])
-            white_content = "".join(results[len(self.adlist_urls):])
+            block_content = "".join(
+                await asyncio.gather(
+                    *[
+                        self.download_file(session, url)
+                        for url in self.adlist_urls
+                    ]
+                )
+            )
+            white_content = "".join(
+                await asyncio.gather(
+                    *[
+                        self.download_file(session, url)
+                        for url in self.whitelist_urls
+                    ]
+                )
+            )
+            
+        # Add dynamic_blacklist
+        with open("dynamic_blacklist.txt", "r") as block_file:
+            block_content += block_file.read()
+
+        # Add dynamic_whitelist
+        with open("dynamic_whitelist.txt", "r") as white_file:
+            white_content += white_file.read()
                         
-        domains = self.convert_to_domain_list(block_content, white_content)
+        domains = convert.convert_to_domain_list(block_content, white_content)
         
         # check if number of domains exceeds the limit
         if len(domains) == 0:
@@ -102,6 +100,7 @@ class App:
         cf_policies = await cloudflare.get_firewall_policies(self.name_prefix)
         logging.info(f"Number of policies in Cloudflare: {len(cf_policies)}")
 
+        # setup the gateway policy
         if len(cf_policies) == 0:
             logging.info("Creating firewall policy")
             cf_policies = await cloudflare.create_gateway_policy(
@@ -112,45 +111,20 @@ class App:
             raise Exception("More than one firewall policy found")
         else:
             logging.info("Updating firewall policy")
-            update_policy_task = asyncio.create_task(
-                cloudflare.update_gateway_policy(
-                    policy_prefix, cf_policies[0]["id"], [l["id"] for l in cf_lists],
-                )
+            await cloudflare.update_gateway_policy(
+                f"{self.name_prefix} Block Ads",
+                cf_policies[0]["id"],
+                [l["id"] for l in cf_lists],
             )
-            await update_policy_task
 
         logging.info("Done")
 
-    async def download_file_async(self, session: aiohttp.ClientSession, url: str):
+    async def download_file(self, session: aiohttp.ClientSession, url: str):
         async with session.get(url) as response:
             text = await response.text("utf-8")
             logging.info(f"Downloaded file from {url} File size: {len(text)}")
             return text
 
-    def convert_to_domain_list(self, block_content: str, white_content: str):
-        domains = set()
-        filters_subdomains = set()
-        white_domains = {convert_domains(line) for line in white_content.splitlines() if convert_domains(line)}
-    
-        logging.info(f"Number of white domains: {len(white_domains)}")
-
-        for line in block_content.splitlines():
-            domain = convert_domains(line)
-            if domain:
-                parts = domain.split(".")
-                is_subdomain = any(".".join(parts[i:]) in filters_subdomains for i in range(len(parts) - 1, 0, -1))
-                if not is_subdomain:
-                    domains.add(domain)
-                    filters_subdomains.add(domain)
-
-        logging.info(f"Number of block domains: {len(domains)}")
-
-        domains -= white_domains
-
-        logging.info(f"Number of final domains: {len(domains)}")
-
-        return sorted(list(domains))
-        
     def chunk_list(self, _list: list[str], n: int):
         for i in range(0, len(_list), n):
             yield _list[i : i + n]
