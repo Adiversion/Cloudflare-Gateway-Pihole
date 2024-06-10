@@ -38,7 +38,8 @@ class CloudflareManager:
         current_lists_count_without_prefix = 0
 
         if current_lists.get("result"):
-            current_lists["result"].sort(key=lambda x: int(re.search(r'\d+', x["name"]).group()))
+
+            current_lists["result"].sort(key=utils.safe_sort_key)
             current_lists_count = len(
                 [list_item for list_item in current_lists["result"] if self.prefix in list_item["name"]]
             )
@@ -81,7 +82,17 @@ class CloudflareManager:
         utils.delete_policy(current_policies)
         utils.delete_lists(current_lists)
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description="Cloudflare Manager Script")
+    parser.add_argument("action", choices=["run", "leave"], help="Choose action: run or leave")
+    args = parser.parse_args()
     cloudflare_manager = CloudflareManager(PREFIX, MAX_LISTS, MAX_LIST_SIZE)
-    cloudflare_manager.run()
-    # cloudflare_manager.leave() # Leave script 
+    if args.action == "run":
+        cloudflare_manager.run()
+    elif args.action == "leave":
+        cloudflare_manager.leave()
+    else:
+        logger.error("Invalid action. Please choose either 'run' or 'leave'.")
+
+if __name__ == "__main__":
+    main()
