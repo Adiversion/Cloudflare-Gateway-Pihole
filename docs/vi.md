@@ -1,11 +1,11 @@
 ![CF_logo_stacked_whitetype](https://github.com/luxysiv/Cloudflare-Gateway-Pihole/assets/46205571/b8b7b12b-2fd8-4978-8e3c-2472a4167acb)
 
-# Dành cho các bạn Việt Nam
-
+### Dành cho các bạn Việt Nam
+---
 Các bạn cần phân biệt `bộ lọc DNS` và `bộ lọc browser`. Mình thấy nhiều bạn đem `bộ lọc browser` lên chạy -> lỗi lướt web
 
-# Hướng dẫn sử dụng
-
+### Hướng dẫn sử dụng
+---
 Thêm `Variables Secrets` vào 
 `https://github.com/your-user/your-repository/settings/secrets/actions`:
 
@@ -24,7 +24,8 @@ hoặc có thể thêm vào **[.env](../.env)** ( **không khuyến khích** )
 Tạo `CF_API_TOKEN` giống như sau:
 ![CF_API_TOKEN](https://github.com/luxysiv/Cloudflare-Gateway-Pihole/assets/46205571/a5b90438-26cc-49ae-9a55-5409a90b683f)
 
-# Cài thời gian script tự động chạy 
+### Cài thời gian script tự động chạy 
+---
 > Sử dụng Cloudflare Workers để chạy Github Action. Không lo sau 2 tháng Github tắt Action.Tạo Github Token không hết hạn với tất cả các quyền
 ```javascript
 addEventListener('scheduled', event => {
@@ -54,48 +55,47 @@ async function handleScheduledEvent() {
 ```
 Nhớ cài cron trigger cho Cloudflare Workers 
 
-# Chú ý 
-
-* Đã hỗ trợ sử dụng list nào cũng được 
-
+### Chú ý  
+---
 * `Giới hạn` của `Cloudflare Gateway Zero Trust free` là `300k domains` nên các bạn nhớ chú ý log, `nếu quá script sẽ stop`
 
 * Các bạn đã tải các danh sách bộ lọc bằng script khác thì nên xoá đi bằng tính năng xoá của script đã up hoặc xoá tay
-
-* Script có 2 workflows dự phòng nếu tải danh sách chặn lên thất bại sẽ chạy tiếp 2 lần mỗi lần là 5p (hạn chế vượt giới hạn requests của Cloudflare). Cho nên tỉ lệ thất bại sẽ rất thấp
-
-* Nếu không biết thêm vào Secret Github Action thì có thể điền giá trị vào file **[.env](../.env)** và sửa file **[main.yml](../.github/workflows/main.yml)** như sau, loại bỏ các dòng secret env
-```yml
-- name: Cloudflare Gateway Zero Trust 
-  run: python -m src 
-```
 
 * Mình đã update thêm tính năng xoá danh sách khi các bạn không muốn sử dụng script nữa. Vào **[__main__.py](../src/__main__.py)** để như sau:
 
 ```python
 if __name__ == "__main__":
     cloudflare_manager = CloudflareManager(PREFIX, MAX_LISTS, MAX_LIST_SIZE)
-    cloudflare_manager.run()
-    # cloudflare_manager.leave() # Leave script 
+    # cloudflare_manager.run()
+    cloudflare_manager.leave() # Leave script 
 ```
 
-* Hỗ trợ **[dynamic_blacklist.txt](../lists/dynamic_blacklist.txt)** và **[dynamic_whitelist.txt](../lists/dynamic_whitelist.txt)** để các bạn tự **chặn hoặc bỏ chặn** tên miền theo ý thích 
+* Hỗ trợ **[dynamic_blacklist.txt](../lists/dynamic_blacklist.txt)** và **[dynamic_whitelist.txt](../lists/dynamic_whitelist.txt)** để các bạn tự `chặn` hoặc `bỏ chặn` tên miền theo ý thích
 
-* Bạn có thể thay tên **DNS-Filters** bằng các tên bạn thích 
+* Hỗ trợ thêm `chặn` và `bỏ chặn` trong `Github Actions variables `. Định dạng giống như **[dynamic_blacklist.txt](../lists/dynamic_blacklist.txt)** và **[dynamic_whitelist.txt](../lists/dynamic_whitelist.txt)** ở `Value*`. `DYNAMIC_BLACKLIST` và `DYNAMIC_WHITELIST` cho `Name*`
 
 * Thêm danh sách `chặn` của bạn vào **[adlist.ini](../lists/adlist.ini)** và `loại bỏ chặn` ở **[whitelist.ini](../lists/whitelist.ini)**
 
 * Đã hỗ trợ 2 loại định dạng danh sách 
 
 ```ini
-https://raw.githubusercontent.com/bigdargon/hostsVN/master/option/hosts-VN
+https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
 ```
 hoặc
 ```ini
-[Hosts-Urls]
-hostsVN = https://raw.githubusercontent.com/bigdargon/hostsVN/master/option/hosts-VN
+[Ad-Urls]
+Adguard = https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
 ```
+* Bạn nên thêm danh sách tùy chỉnh vào `Action variables` như sau
+> Name:
+  >> `ADLIST_URLS` hoặc `WHITELIST_URLS`.
 
+  > Value: `danh sách các URLs`
+  >> Ví dụ:
+  ```text
+  https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
+  ```
 
 👌 Chúc các bạn thành công 
 
