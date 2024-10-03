@@ -4,3 +4,4 @@ myanimelist.net
 whatsapp.com
 whatsapp.net
 securepubads.g.doubleclick.net
+pagead2.googlesyndication.com
