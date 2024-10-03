@@ -3,3 +3,6 @@ api-js.datadome.co
 myanimelist.net
 whatsapp.com
 whatsapp.net
+securepubads.g.doubleclick.net/tag/js/gpt.js
+stats.wp.com/e-202440.js
+pagead2.googlesyndication.com/pagead/js/adsbygoogle.js
