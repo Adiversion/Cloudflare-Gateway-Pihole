@@ -3,3 +3,4 @@ api-js.datadome.co
 myanimelist.net
 whatsapp.com
 whatsapp.net
+securepubads.g.doubleclick.net
