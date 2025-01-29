@@ -49,6 +49,7 @@ class DomainConverter:
 
     @retry(**retry_config)
     def download_file(self, url):
+        print(f"Trying to download: {url}")
         parsed_url = urlparse(url)
         if parsed_url.scheme == "https":
             conn = http.client.HTTPSConnection(parsed_url.netloc)
