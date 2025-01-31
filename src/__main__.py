@@ -67,8 +67,8 @@ class CloudflareManager:
                 new_list_ids.append(lst["id"])
 
     self._update_rule(current_rules, new_list_ids)
-    utils.save_cache(self.cache)
-
+    utils.save_cache(self.cache
+                     
     def _update_rule(self, current_rules, new_list_ids):
         cgp_rule = next((rule for rule in current_rules if rule["name"] == self.rule_name), None)
         cgp_list_ids = utils.extract_list_ids(cgp_rule) if cgp_rule else []
