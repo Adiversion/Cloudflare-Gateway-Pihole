@@ -5,23 +5,24 @@ from configparser import ConfigParser
 from src import info, convert, silent_error, error
 from src.requests import retry, retry_config, RateLimitException, HTTPException
 
-
+# Define the DomainConverter class for processing URL lists
 class DomainConverter:
     def __init__(self):
-        """Initialize with URL mapping and environment variables."""
+        # Map of environment variables to file paths
         self.env_file_map = {
             "ADLIST_URLS": "./lists/adlist.ini",
             "WHITELIST_URLS": "./lists/whitelist.ini",
             "DYNAMIC_BLACKLIST": "./lists/dynamic_blacklist.txt",
             "DYNAMIC_WHITELIST": "./lists/dynamic_whitelist.txt"
         }
+        # Read adlist and whitelist URLs from environment and files
         self.adlist_urls = self.read_urls("ADLIST_URLS")
         self.whitelist_urls = self.read_urls("WHITELIST_URLS")
 
     def read_urls_from_file(self, filename):
-        """Read URLs from a file, falling back to plain text if INI parsing fails."""
         urls = []
         try:
+            # Try reading as an INI file
             config = ConfigParser()
             config.read(filename)
             for section in config.sections():
@@ -29,18 +30,18 @@ class DomainConverter:
                     if not key.startswith("#"):
                         urls.append(config.get(section, key))
         except Exception:
-            # Fallback to plain text reading if INI reading fails
+            # Fallback to read as a plain text file
             with open(filename, "r") as file:
-                urls = [url.strip() for url in file if not url.startswith("#") and url.strip()]
+                urls = [
+                    url.strip() for url in file if not url.startswith("#") and url.strip()
+                ]
         return urls
-
+    
     def read_urls_from_env(self, env_var):
-        """Read URLs from an environment variable."""
         urls = os.getenv(env_var, "")
         return [url.strip() for url in urls.split() if url.strip()]
 
     def read_urls(self, env_var):
-        """Read URLs from both file and environment variable."""
         file_path = self.env_file_map[env_var]
         urls = self.read_urls_from_file(file_path)
         urls += self.read_urls_from_env(env_var)
@@ -48,29 +49,40 @@ class DomainConverter:
 
     @retry(**retry_config)
     def download_file(self, url):
-        """Download file from the provided URL, handling redirects and errors."""
-        print(f"Trying to download: {url}")
         parsed_url = urlparse(url)
-        conn_class = http.client.HTTPSConnection if parsed_url.scheme == "https" else http.client.HTTPConnection
-        conn = conn_class(parsed_url.netloc)
-        headers = {'User-Agent': 'Mozilla/5.0'}
-
+        if parsed_url.scheme == "https":
+            conn = http.client.HTTPSConnection(parsed_url.netloc)
+        else:
+            conn = http.client.HTTPConnection(parsed_url.netloc)
+    
+        headers = {
+            'User-Agent': 'Mozilla/5.0'
+        }
+    
         conn.request("GET", parsed_url.path, headers=headers)
         response = conn.getresponse()
-
+    
         # Handle redirection responses
         while response.status in (301, 302, 303, 307, 308):
             location = response.getheader('Location')
             if not location:
                 break
             # Construct new absolute URL if relative path is returned
-            location = urljoin(url, location) if not urlparse(location).netloc else location
+            if not urlparse(location).netloc:
+                location = urljoin(url, location)
+        
             url = location
             parsed_url = urlparse(url)
-            conn = conn_class(parsed_url.netloc)
+        
+            # Create new connection based on the new URL scheme
+            if parsed_url.scheme == "https":
+                conn = http.client.HTTPSConnection(parsed_url.netloc)
+            else:
+                conn = http.client.HTTPConnection(parsed_url.netloc)
+        
             conn.request("GET", parsed_url.path, headers=headers)
             response = conn.getresponse()
-
+    
         # Raise error for non-200 status codes
         if response.status != 200:
             error_message = f"Failed to download file from {url}, status code: {response.status}"
@@ -81,35 +93,36 @@ class DomainConverter:
             else:
                 raise HTTPException(error_message)
 
-        # Read response data and close connection
+        # Read response data and close the connection
         data = response.read().decode('utf-8')
         conn.close()
         info(f"Downloaded file from {url}. File size: {len(data)}")
         return data
 
     def process_urls(self):
-        """Process all adlist and whitelist URLs and dynamic lists."""
-        block_content = self._download_urls(self.adlist_urls)
-        white_content = self._download_urls(self.whitelist_urls)
-
+        block_content = ""
+        white_content = ""
+        for url in self.adlist_urls:
+            block_content += self.download_file(url)
+        for url in self.whitelist_urls:
+            white_content += self.download_file(url)
+        
         # Read additional dynamic lists
-        block_content += self._read_dynamic_list("DYNAMIC_BLACKLIST", self.env_file_map["DYNAMIC_BLACKLIST"])
-        white_content += self._read_dynamic_list("DYNAMIC_WHITELIST", self.env_file_map["DYNAMIC_WHITELIST"])
-
-        # Convert collected content into a domain list
-        return convert.convert_to_domain_list(block_content, white_content)
-
-    def _download_urls(self, urls):
-        """Helper method to download content for a list of URLs."""
-        content = ""
-        for url in urls:
-            content += self.download_file(url)
-        return content
-
-    def _read_dynamic_list(self, env_var, file_path):
-        """Helper method to read dynamic blacklist/whitelist from either environment variable or file."""
-        dynamic_content = os.getenv(env_var, "")
-        if dynamic_content:
-            return dynamic_content
-        with open(file_path, "r") as file:
-            return file.read()
+        dynamic_blacklist = os.getenv("DYNAMIC_BLACKLIST", "")
+        dynamic_whitelist = os.getenv("DYNAMIC_WHITELIST", "")
+        
+        if dynamic_blacklist:
+            block_content += dynamic_blacklist
+        else:
+            with open(self.env_file_map["DYNAMIC_BLACKLIST"], "r") as black_file:
+                block_content += black_file.read()
+        
+        if dynamic_whitelist:
+            white_content += dynamic_whitelist
+        else:
+            with open(self.env_file_map["DYNAMIC_WHITELIST"], "r") as white_file:
+                white_content += white_file.read()
+        
+        # Convert the collected content into a domain list
+        domains = convert.convert_to_domain_list(block_content, white_content)
+        return domains
