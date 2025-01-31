@@ -15,56 +15,59 @@ class CloudflareManager:
         self.cache = utils.load_cache()
 
     def update_resources(self):
-        domains_to_block = DomainConverter().process_urls()
-        if len(domains_to_block) > 300000:
-            error("The domains list exceeds Cloudflare Gateway's free limit of 300,000 domains.")
-        
-        current_lists = utils.get_current_lists(self.cache, self.list_name)
-        current_rules = utils.get_current_rules(self.cache, self.rule_name)
+    domains_to_block = DomainConverter().process_urls()
+    if len(domains_to_block) > 300000:
+        error("The domains list exceeds Cloudflare Gateway's free limit of 300,000 domains.")
+    
+    current_lists = utils.get_current_lists(self.cache, self.list_name)
+    current_rules = utils.get_current_rules(self.cache, self.rule_name)
 
-        list_id_to_domains = {lst["id"]: set(utils.get_list_items_cached(self.cache, lst["id"])) for lst in current_lists}
-        domain_to_list_id = {domain: lst_id for lst_id, domains in list_id_to_domains.items() for domain in domains}
+    list_id_to_domains = {lst["id"]: set(utils.get_list_items_cached(self.cache, lst["id"])) for lst in current_lists}
+    domain_to_list_id = {domain: lst_id for lst_id, domains in list_id_to_domains.items() for domain in domains}
 
-        remaining_domains = set(domains_to_block) - set(domain_to_list_id.keys())
+    remaining_domains = set(domains_to_block) - set(domain_to_list_id.keys())
 
-        list_name_to_id = {lst["name"]: lst["id"] for lst in current_lists}
-        existing_indexes = sorted([int(name.split('-')[-1]) for name in list_name_to_id.keys()])
-        max_needed_index = (len(domains_to_block) + 999) // 1000
-        all_indexes = set(range(1, max(existing_indexes + [max_needed_index]) + 1))
-        
-        new_list_ids = []
-        for i in all_indexes:
-            list_name = f"{self.list_name} - {i:03d}"
-            list_id = list_name_to_id.get(list_name)
+    list_name_to_id = {lst["name"]: lst["id"] for lst in current_lists}
+    existing_indexes = sorted([int(name.split('-')[-1]) for name in list_name_to_id.keys()])
+    max_needed_index = (len(domains_to_block) + 999) // 1000
+    all_indexes = set(range(1, max(existing_indexes + [max_needed_index]) + 1))
+    
+    new_list_ids = []
+    for i in all_indexes:
+        list_name = f"{self.list_name} - {i:03d}"
+        list_id = list_name_to_id.get(list_name)
 
-            if list_id:
-                current_values = list_id_to_domains[list_id]
-                remove_items = current_values - set(domains_to_block)
-                chunk = current_values - remove_items
+        if list_id:
+            current_values = list_id_to_domains[list_id]
+            remove_items = current_values - set(domains_to_block)
+            chunk = current_values - remove_items
 
-                if len(chunk) < 1000:
-                    new_items = list(remaining_domains)[:1000 - len(chunk)]
-                    chunk.update(new_items)
-                    remaining_domains.difference_update(new_items)
+            # Initialize new_items outside the conditional block
+            new_items = []
 
-                if remove_items or new_items:
-                    update_list(list_id, remove_items, new_items)
-                    info(f"Updated list: {list_name}")
-                    self.cache["mapping"][list_id] = list(chunk)
-                
-                new_list_ids.append(list_id)
-            else:
-                if remaining_domains:
-                    new_items = list(remaining_domains)[:1000]
-                    remaining_domains.difference_update(new_items)
-                    lst = create_list(list_name, new_items)
-                    info(f"Created list: {lst['name']}")
-                    self.cache["lists"].append(lst)
-                    self.cache["mapping"][lst["id"]] = new_items
-                    new_list_ids.append(lst["id"])
+            if len(chunk) < 1000:
+                new_items = list(remaining_domains)[:1000 - len(chunk)]
+                chunk.update(new_items)
+                remaining_domains.difference_update(new_items)
 
-        self._update_rule(current_rules, new_list_ids)
-        utils.save_cache(self.cache)
+            if remove_items or new_items:
+                update_list(list_id, remove_items, new_items)
+                info(f"Updated list: {list_name}")
+                self.cache["mapping"][list_id] = list(chunk)
+            
+            new_list_ids.append(list_id)
+        else:
+            if remaining_domains:
+                new_items = list(remaining_domains)[:1000]
+                remaining_domains.difference_update(new_items)
+                lst = create_list(list_name, new_items)
+                info(f"Created list: {lst['name']}")
+                self.cache["lists"].append(lst)
+                self.cache["mapping"][lst["id"]] = new_items
+                new_list_ids.append(lst["id"])
+
+    self._update_rule(current_rules, new_list_ids)
+    utils.save_cache(self.cache)
 
     def _update_rule(self, current_rules, new_list_ids):
         cgp_rule = next((rule for rule in current_rules if rule["name"] == self.rule_name), None)
