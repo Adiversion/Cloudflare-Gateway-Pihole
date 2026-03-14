@@ -2,9 +2,22 @@
 
 **[English](README.md)** | **[Việt Nam](docs/vi.md)**
 
-# New update 
+# Schedule
 
-* If you receive an e-mail that says GitHub Action will be stop, don't worry, GitHub Action will continue to run forever. 
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/luxysiv/cloudflare-gateway-pihole-trigger)
+
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `GITHUB_TOKEN` | Your GitHub Personal Access Token (Need Workflow permission and no expiration) | `ghp_xxxxxxxxxxxx` |
+| `GITHUB_USER` | Your GitHub username | `luxysiv` |
+| `GITHUB_REPO` | The name of your repository | `Cloudflare-Gateway-Pihole` |
+| `WORKFLOW_ID` | The filename of your workflow | `main.yml` |
+
+* Opt for a private repository when deploying.
+
+* Once deployment is complete, you may remove the cloned repository.
+
+# New update 
 
 * Major update, you can run cron every hour, no need to worry about losing blocking effect, no damage to Cloudflare Gateway server 
 
@@ -59,6 +72,7 @@ Adguard = https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
   ```
 
 * You should add your ad list and whitelist to Action variables. If you update your fork, your custom list will not be lost.
+
 
 ### How to set this up?
 ---
