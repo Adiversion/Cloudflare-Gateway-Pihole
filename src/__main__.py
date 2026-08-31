@@ -1,102 +1,313 @@
 import argparse
-from src.domains import DomainConverter
+from src.domains import BlockDomainConverter, AllowDomainConverter
+from src import utils, info, silent_error, error, BLOCK_PREFIX, ALLOW_PREFIX, ENABLE_SNI_FILTER
 from src.cloudflare import (
-    get_lists, get_rules, create_list, update_list, create_rule, 
-    update_rule, delete_list, delete_rule, get_list_items
+    create_list, update_list, create_rule,
+    update_rule, delete_list, delete_rule
 )
-from src import utils, info, error, silent_error, PREFIX
+from src.requests import NotFoundException
+
+# Cloudflare Gateway free tier hard limit for number of lists
+MAX_TOTAL_LISTS = 300
 
 
 class CloudflareManager:
-    def __init__(self, prefix_name):
-        self.prefix_name = f"[{prefix_name}]"
-        self.rule_name = f"[{prefix_name}] Block Ads"
+    def __init__(self, cache):
+        self.cache = cache
 
-    def update_resources(self):
-        domains_to_block = DomainConverter().process_urls()
-        if len(domains_to_block) > 300000:
-            error("The domains list exceeds Cloudflare Gateway's free limit of 300,000 domains.")
-        
-        current_lists = get_lists(self.prefix_name)
-        current_rules = get_rules(self.rule_name)
+        # Block config
+        self.block_list_name = f"[{BLOCK_PREFIX}]"
+        self.block_rule_name = f"[{BLOCK_PREFIX}] Block Ads"
+        self.block_sni_rule_name = f"[{BLOCK_PREFIX}] Block Ads (SNI)"
 
-        chunked_domains = list(utils.split_domain_list(domains_to_block, 1000))
-        list_ids = []
+        # Allow config
+        self.allow_list_name = f"[{ALLOW_PREFIX}]"
+        self.allow_rule_name = f"[{ALLOW_PREFIX}] Allow"
 
-        for index, chunk in enumerate(chunked_domains, start=1):
-            list_name = f"{self.prefix_name} - {index:03d}"
-            
-            existing_list = next((lst for lst in current_lists if lst["name"] == list_name), None)
-
-            if existing_list:
-                current_items = get_list_items(existing_list["id"])
-                current_values = {item["value"] for item in current_items}
-                remove_items = list(current_values - set(chunk))
-                append_items = list(set(chunk) - current_values)
-
-                if not remove_items and not append_items:
-                    silent_error(f"Skipping list update: {list_name}")
-                else:
-                    update_list(existing_list["id"], remove_items, append_items)
-                    info(f"Updated list: {list_name}")
-                list_ids.append(existing_list["id"])
-            else:
-                list_id = create_list(list_name, chunk)
-                info(f"Created list: {list_name}")
-                list_ids.append(list_id)
-
-        # Extract existing list IDs from current_rules for comparison
-        existing_rule = next((rule for rule in current_rules if rule["name"] == self.rule_name), None)
+    # ------------------------------------------------------------------
+    # Generic list/rule sync (shared by both block and allow)
+    # ------------------------------------------------------------------
+    def _sync_rule(self, list_ids, rule_name, rule_action, rule_priority,
+                    filters=None, traffic_field="dns.domains"):
+        current_rules = utils.get_current_rules(self.cache, rule_name)
+        existing_rule = next((r for r in current_rules if r["name"] == rule_name), None)
         existing_list_ids = utils.extract_list_ids(existing_rule)
 
-        if set(list_ids) == existing_list_ids:
-            silent_error(f"Skipping rule update as list IDs are unchanged: {self.rule_name}")
-        else:
-            if existing_rule:
-                rule_id = existing_rule["id"]
-                info(f"Rule '{self.rule_name}' already exists. Updating...")
-                update_rule(self.rule_name, rule_id, list_ids)
+        if existing_rule:
+            if set(list_ids) != existing_list_ids:
+                try:
+                    updated = update_rule(rule_name, existing_rule["id"], list_ids,
+                                          action=rule_action, priority=rule_priority,
+                                          filters=filters, traffic_field=traffic_field)
+                    info(f"[~] Updated rule: {updated['name']}")
+                    self.cache["rules"] = [
+                        r for r in self.cache["rules"] if r["id"] != existing_rule["id"]
+                    ]
+                    self.cache["rules"].append(updated)
+                except NotFoundException:
+                    silent_error(
+                        f"[·] Rule {rule_name} ({existing_rule['id']}) missing on Cloudflare "
+                        f"— evicting from cache and recreating"
+                    )
+                    self.cache["rules"] = [
+                        r for r in self.cache["rules"] if r["id"] != existing_rule["id"]
+                    ]
+                    rule = create_rule(rule_name, list_ids, action=rule_action,
+                                       priority=rule_priority, filters=filters,
+                                       traffic_field=traffic_field)
+                    info(f"[+] Recreated rule: {rule['name']}")
+                    self.cache["rules"].append(rule)
             else:
-                info(f"Rule '{self.rule_name}' does not exist. Creating...")
-                create_rule(self.rule_name, list_ids)
+                silent_error(f"[·] Skipping rule update (unchanged): {rule_name}")
+        else:
+            rule = create_rule(rule_name, list_ids, action=rule_action,
+                               priority=rule_priority, filters=filters,
+                               traffic_field=traffic_field)
+            info(f"[+] Created rule: {rule['name']}")
+            self.cache["rules"].append(rule)
 
-            info(f"Updated rule: {self.rule_name}")
+        utils.save_cache(self.cache)
 
-        # Delete excess lists
-        excess_lists = [lst for lst in current_lists if lst["id"] not in list_ids]
-        for lst in excess_lists:
-            delete_list(lst["id"])
-            info(f"Deleted excess list: {lst['name']}")
+    def _delete_rule_by_name(self, rule_name):
+        current_rules = utils.get_current_rules(self.cache, rule_name)
+        for rule in current_rules:
+            try:
+                delete_rule(rule["id"])
+                info(f"[−] Deleted rule: {rule['name']}")
+            except NotFoundException:
+                silent_error(f"[·] Rule {rule['name']} already gone on Cloudflare — skipping")
+            self.cache["rules"] = [r for r in self.cache["rules"] if r["id"] != rule["id"]]
+            utils.save_cache(self.cache)
 
-    def delete_resources(self):
-        current_lists = get_lists(self.prefix_name)
-        current_rules = get_rules(self.rule_name)
+    def _sync_lists(self, domains, list_name_prefix, rule_name, rule_action, rule_priority,
+                     sni_rule_name=None):
+        current_lists = utils.get_current_lists(self.cache, list_name_prefix)
+
+        list_id_to_domains = {}
+        for lst in current_lists:
+            items = utils.get_list_items_cached(self.cache, lst["id"])
+            list_id_to_domains[lst["id"]] = set(items)
+
+        domain_to_list_id = {
+            domain: lst_id
+            for lst_id, doms in list_id_to_domains.items()
+            for domain in doms
+        }
+
+        remaining_domains = set(domains) - set(domain_to_list_id.keys())
+
+        list_name_to_id = {lst["name"]: lst["id"] for lst in current_lists}
+        existing_indexes = sorted(
+            [int(name.split("-")[-1]) for name in list_name_to_id.keys()]
+        )
+
+        needed_lists = (len(domains) + 999) // 1000
+        all_indexes = set(range(1, max(existing_indexes + [needed_lists]) + 1))
+
+        new_list_ids = []
+        for i in sorted(all_indexes):
+            list_name = f"{list_name_prefix} - {i:03d}"
+            if list_name in list_name_to_id:
+                list_id = list_name_to_id[list_name]
+                current_values = list_id_to_domains[list_id]
+                remove_items = current_values - set(domains)
+                chunk = current_values - remove_items
+
+                new_items = []
+                if len(chunk) < 1000 and remaining_domains:
+                    needed_items = 1000 - len(chunk)
+                    new_items = list(remaining_domains)[:needed_items]
+                    chunk.update(new_items)
+                    remaining_domains.difference_update(new_items)
+
+                if not chunk:
+                    # Nothing left to keep here — domains shrank enough
+                    # that this list isn't needed at all anymore. Delete
+                    # it outright instead of leaving an empty resource
+                    # (and a stale cache entry that never gets cleaned
+                    # up) sitting around and eating into the 300-list quota.
+                    try:
+                        delete_list(list_id)
+                        info(f"[−] Deleted list: {list_name} (no longer needed)")
+                    except NotFoundException:
+                        silent_error(f"[·] List {list_name} already gone on Cloudflare — skipping")
+                    self.cache["lists"] = [l for l in self.cache["lists"] if l["id"] != list_id]
+                    self.cache["mapping"].pop(list_id, None)
+                    utils.save_cache(self.cache)
+                    continue
+
+                if remove_items or new_items:
+                    try:
+                        update_list(list_id, remove_items, new_items)
+                        info(
+                            f"[~] Updated list: {list_name} "
+                            f"| Added {len(new_items)}, Removed {len(remove_items)} "
+                            f"| Total: {len(chunk)}"
+                        )
+                        self.cache["mapping"][list_id] = list(chunk)
+                    except NotFoundException:
+                        # Cache is stale: this list was deleted outside the
+                        # script (e.g. manually on the dashboard). Evict it
+                        # and recreate from scratch instead of failing the run.
+                        silent_error(
+                            f"[·] List {list_name} ({list_id}) missing on Cloudflare "
+                            f"— evicting from cache and recreating"
+                        )
+                        self.cache["lists"] = [l for l in self.cache["lists"] if l["id"] != list_id]
+                        self.cache["mapping"].pop(list_id, None)
+                        lst = create_list(list_name, list(chunk))
+                        info(f"[+] Recreated list: {lst['name']} with {len(chunk)} domains")
+                        self.cache["lists"].append(lst)
+                        self.cache["mapping"][lst["id"]] = list(chunk)
+                        list_id = lst["id"]
+                    # Only persist when something actually changed — writing
+                    # the whole cache back to disk on every single list,
+                    # even the ones with nothing to do, is what was causing
+                    # a multi-hundred-ms stall per "Skipped (no changes)"
+                    # line once the cache holds hundreds of 1000-domain lists.
+                    utils.save_cache(self.cache)
+                else:
+                    silent_error(f"[·] Skipped (no changes): {list_name} | Total: {len(chunk)}")
+
+                new_list_ids.append(list_id)
+            else:
+                if remaining_domains:
+                    needed_items = min(1000, len(remaining_domains))
+                    new_items = list(remaining_domains)[:needed_items]
+                    remaining_domains.difference_update(new_items)
+                    lst = create_list(list_name, new_items)
+                    info(f"[+] Created list: {lst['name']} with {len(new_items)} domains")
+                    self.cache["lists"].append(lst)
+                    self.cache["mapping"][lst["id"]] = new_items
+                    utils.save_cache(self.cache)
+                    new_list_ids.append(lst["id"])
+
+        # Sync the DNS rule
+        self._sync_rule(new_list_ids, rule_name, rule_action, rule_priority)
+
+        # Optional companion Network (L4) rule: blocks by TLS SNI instead of
+        # DNS resolution. Reuses the same domain lists — Cloudflare Zero
+        # Trust lists of type DOMAIN can be referenced from either a DNS
+        # rule (dns.domains) or a Network rule (net.sni.domains). Only takes
+        # effect for devices connected via WARP with the TCP proxy enabled.
+        if sni_rule_name:
+            self._sync_rule(
+                new_list_ids, sni_rule_name, rule_action, rule_priority,
+                filters=["l4"], traffic_field="net.sni.domains",
+            )
+
+        utils.save_cache(self.cache)
+        return len(new_list_ids)
+
+    def _delete_by_prefix(self, list_name_prefix, rule_name):
+        current_lists = utils.get_current_lists(self.cache, list_name_prefix)
+        current_rules = utils.get_current_rules(self.cache, rule_name)
         current_lists.sort(key=utils.safe_sort_key)
 
-        info(f"Deleting rule '{self.rule_name}' and associated lists.")
-
-        # Delete rules with the name rule_name
         for rule in current_rules:
-            delete_rule(rule["id"])
-            info(f"Deleted rule: {rule['name']}")
+            try:
+                delete_rule(rule["id"])
+                info(f"[−] Deleted rule: {rule['name']}")
+            except NotFoundException:
+                silent_error(f"[·] Rule {rule['name']} already gone on Cloudflare — skipping")
+            self.cache["rules"] = [r for r in self.cache["rules"] if r["id"] != rule["id"]]
+            utils.save_cache(self.cache)
 
-        # Delete lists with names that include prefix_name
         for lst in current_lists:
-            delete_list(lst["id"])
-            info(f"Deleted list: {lst['name']}")
+            try:
+                delete_list(lst["id"])
+                info(f"[−] Deleted list: {lst['name']}")
+            except NotFoundException:
+                silent_error(f"[·] List {lst['name']} already gone on Cloudflare — skipping")
+            self.cache["lists"] = [l for l in self.cache["lists"] if l["id"] != lst["id"]]
+            if lst["id"] in self.cache["mapping"]:
+                del self.cache["mapping"][lst["id"]]
+            utils.save_cache(self.cache)
+
+    # ------------------------------------------------------------------
+    # Public actions
+    # ------------------------------------------------------------------
+    def update_resources(self):
+        info("=== [1/2] Processing BLOCK domains ===")
+        block_converter = BlockDomainConverter()
+        domains_to_block = block_converter.process_urls()
+
+        info("=== [2/2] Processing ALLOW domains ===")
+        # Promote AdBlock/uBlock exception rules from the block sources,
+        # e.g. @@||drive.quark.cn^, into the dedicated Cloudflare Allow list.
+        domains_to_allow = AllowDomainConverter().process_urls(
+            extra_domains=block_converter.auto_whitelist_domains
+        )
+
+        # --- Guard: total lists must not exceed Cloudflare free tier limit ---
+        block_lists_needed = (len(domains_to_block) + 999) // 1000
+        allow_lists_needed = (len(domains_to_allow) + 999) // 1000
+        total_lists_needed = block_lists_needed + allow_lists_needed
+
+        info(
+            f"Lists needed → Block: {block_lists_needed}, "
+            f"Allow: {allow_lists_needed}, "
+            f"Total: {total_lists_needed} / {MAX_TOTAL_LISTS}"
+        )
+
+        if total_lists_needed > MAX_TOTAL_LISTS:
+            error(
+                f"Total lists needed ({total_lists_needed}) exceeds "
+                f"Cloudflare Gateway free limit of {MAX_TOTAL_LISTS} lists. "
+                f"Reduce your adlists or whitelist sources."
+            )
+
+        info("=== Syncing BLOCK lists & rule ===")
+        # Allow rule has higher precedence (lower number = higher priority)
+        self._sync_lists(
+            domains_to_block,
+            self.block_list_name,
+            self.block_rule_name,
+            rule_action="block",
+            rule_priority=1000,
+            sni_rule_name=self.block_sni_rule_name if ENABLE_SNI_FILTER else None,
+        )
+
+        info("=== Syncing ALLOW lists & rule ===")
+        self._sync_lists(
+            domains_to_allow,
+            self.allow_list_name,
+            self.allow_rule_name,
+            rule_action="allow",
+            rule_priority=999,   # Lower number = evaluated first → allow wins over block
+        )
+
+        info("=== Done ===")
+
+    def delete_resources(self):
+        info("=== Deleting BLOCK resources ===")
+        self._delete_rule_by_name(self.block_sni_rule_name)
+        self._delete_by_prefix(self.block_list_name, self.block_rule_name)
+        info("=== Deleting ALLOW resources ===")
+        self._delete_by_prefix(self.allow_list_name, self.allow_rule_name)
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Cloudflare Manager Script")
-    parser.add_argument("action", choices=["run", "leave"], help="Choose action: run or leave")
-    args = parser.parse_args()    
-    cloudflare_manager = CloudflareManager(PREFIX)
-    
+    parser = argparse.ArgumentParser(
+        description="Cloudflare Gateway DNS Filter Manager (Block + Allow)"
+    )
+    parser.add_argument(
+        "action", choices=["run", "leave"], help="run: sync resources | leave: delete all"
+    )
+    args = parser.parse_args()
+
+    cache = utils.load_cache()
+    manager = CloudflareManager(cache)
+
     if args.action == "run":
-        cloudflare_manager.update_resources()
+        manager.update_resources()
+        if utils.is_running_in_github_actions():
+            utils.delete_cache()
     elif args.action == "leave":
-        cloudflare_manager.delete_resources()
+        manager.delete_resources()
     else:
-        error("Invalid action. Please choose either 'run' or 'leave'.")
+        error("Invalid action. Choose 'run' or 'leave'.")
+
 
 if __name__ == "__main__":
     main()

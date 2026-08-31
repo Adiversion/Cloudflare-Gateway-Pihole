@@ -1,101 +1,138 @@
-![CF_logo_stacked_whitetype](https://github.com/luxysiv/Cloudflare-Gateway-Pihole/assets/46205571/b8b7b12b-2fd8-4978-8e3c-2472a4167acb)
+**[English](README.md)** | **[Tiếng Việt](docs/vi.md)**
 
-**[English](README.md)** | **[Việt Nam](docs/vi.md)**
+![Cloudflare Gateway](https://github.com/luxysiv/Cloudflare-Gateway-Pihole/assets/46205571/b8b7b12b-2fd8-4978-8e3c-2472a4167acb)
 
-# Pihole styled, but using Cloudflare Gateway
+# Cloudflare Gateway DNS Filter — Block + Allow
+
+> Pihole-style DNS ad blocking using Cloudflare Gateway Zero Trust, with a dedicated Allow rule that takes precedence over blocking.
+
 `For Devs, Ops, and everyone who hates Ads.`
 
-Create your ad blocklist using Cloudflare Gateway.
-
-### Credit goes there
 ---
 
-> Thanks a lot to [@nhubaotruong](https://github.com/nhubaotruong) for his contributions.
+# Schedule
 
-> Readme by [@minlaxz](https://github.com/minlaxz).
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/luxysiv/cloudflare-gateway-pihole-trigger)
 
->> Added dynamic domain filter (whitelist and blacklist) idea (please check `ini` files, as you may also need to modify those).
->>> Added dynamic domain filter (whitelist and blacklist) to Actions variables (please check [dynamic_blacklist.txt](./lists/dynamic_blacklist.txt) and [dynamic_whitelist.txt](./lists/dynamic_whitelist.txt). to know examples to add `Value*`).Use `DYNAMIC_BLACKLIST` and `DYNAMIC_WHITELIST` for `Name*` in Actions variables 
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `GITHUB_TOKEN` | Your GitHub Personal Access Token (Need Workflow permission and no expiration) | `ghp_xxxxxxxxxxxx` |
+| `GITHUB_USER` | Your GitHub username | `luxysiv` |
+| `GITHUB_REPO` | The name of your repository | `Cloudflare-Gateway-DNS-Filter` |
+| `WORKFLOW_ID` | The filename of your workflow | `main.yml` |
 
-### Supported styles
+* Opt for a private repository when deploying.
+
+* Once deployment is complete, you may remove the cloned repository.
+
 ---
-* Two kinds of lists in ini files: white list [whitelist.ini](./lists/whitelist.ini) and block list [adlist.ini](./lists/adlist.ini).
 
-```ini
-https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
-```
-or
+## How it works
+
+This script manages two sets of Cloudflare Gateway DNS rules in a single workflow run:
+
+| Rule | Action | Precedence | Source |
+| :--- | :--- | :--- | :--- |
+| `[AdBlock-DNS-Filters] Block Ads` | block | 1000 | `adlist.ini` + `dynamic_blacklist.txt` |
+| `[AdAllow-DNS-Filters] Allow` | allow | 999 *(higher priority)* | `whitelist.ini` + `dynamic_whitelist.txt` |
+| `[AdBlock-DNS-Filters] Block Ads (SNI)` *(optional)* | block | 1000 | Reuses the block list above |
+
+Because the Allow rule has a **lower precedence number** (999 < 1000), Cloudflare evaluates it first — so whitelisted domains are always resolved even if they appear in a blocklist. There is no need to subtract the whitelist from the block list in code.
+
+The script also enforces Cloudflare Gateway's **free tier limit of 300 lists** across both rules combined. If your sources would require more than 300 lists, the script stops before making any changes.
+
+---
+
+## (Optional) SNI-based blocking — resist DNS bypass
+
+Plain DNS filtering has a blind spot: if a device or app ignores your DNS server (uses its own DNS-over-HTTPS, or connects straight to an IP), it can dodge the filter entirely.
+
+SNI (Server Name Indication) is the domain name sent in cleartext during the TLS handshake, before the connection is encrypted. Enabling SNI filtering makes Gateway inspect that handshake directly instead of relying on DNS — so even if a device bypasses DNS, the connection to a blocked domain still gets cut.
+
+**To enable it:**
+
+1. Set the environment variable / Actions variable `ENABLE_SNI_FILTER` to `true`.
+2. In the Cloudflare Zero Trust dashboard, go to **Settings → Network** and enable **Gateway proxy for TCP**. Without this, the rule exists but has no effect.
+3. Devices must connect through the **WARP client** (Gateway with WARP mode) — just pointing DNS at Cloudflare is not enough for this rule to see the traffic.
+
+The SNI rule reuses the same domain lists as the DNS block rule, so it doesn't consume any extra list quota.
+
+---
+
+## Setup
+
+### 1. Fork this repository
+
+### 2. Get your Cloudflare credentials
+
+- **Account ID** — found in the URL after `https://dash.cloudflare.com/`:
+  `https://dash.cloudflare.com/?to=/:account/workers`
+
+- **API Token** — create at `https://dash.cloudflare.com/profile/api-tokens` with these 3 permissions:
+  1. `Account › Zero Trust : Edit`
+  2. `Account › Account Firewall Access Rules : Edit`
+  3. `Account › Access: Apps and Policies : Edit`
+
+### 3. Add Repository Secrets
+
+Go to `https://github.com/<username>/Cloudflare-Gateway-DNS-Filter/settings/secrets/actions` and add:
+
+| Secret | Value |
+| :--- | :--- |
+| `CF_API_TOKEN` | Your Cloudflare API Token |
+| `CF_IDENTIFIER` | Your Cloudflare Account ID |
+
+### 4. Configure your lists
+
+**Block list** — edit [`lists/adlist.ini`](./lists/adlist.ini):
 ```ini
 [Ad-Urls]
 Adguard = https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
 ```
 
-### Custom URLs
----
-* Add to file:
-  > White list [whitelist.ini](./lists/whitelist.ini) and block list [adlist.ini](./lists/adlist.ini).
+**Allow list** — edit [`lists/whitelist.ini`](./lists/whitelist.ini):
+```ini
+[Allow-Urls]
+MyAllow = https://example.com/my-whitelist.txt
+```
 
-* Add to GitHub Action variables:
-  > `Name*`
-  >> `ADLIST_URLS` or `WHITELIST_URLS`.
+Both files accept plain URLs (one per line) or the `[Section] key = url` INI format.
 
-  > `Value*` `URLs list`
-  >> Example:
-  ```text
-  https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
-  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
-  ```
+### 5. (Optional) Add lists via GitHub Actions Variables
+
+Go to `https://github.com/<username>/Cloudflare-Gateway-DNS-Filter/settings/variables/actions` and add:
+
+| Name | Value |
+| :--- | :--- |
+| `ADLIST_URLS` | Space-separated block list URLs |
+| `WHITELIST_URLS` | Space-separated allow list URLs |
+| `DYNAMIC_BLACKLIST` | Extra domains to block (one per line) |
+| `DYNAMIC_WHITELIST` | Extra domains to allow (one per line) |
+| `ENABLE_SNI_FILTER` | Set to `true` to enable the extra SNI-based block rule (see section above) |
 
 * You should add your ad list and whitelist to Action variables. If you update your fork, your custom list will not be lost.
 
-### How to set this up?
 ---
-1. Fork this repository to your account.
-2. Grab your **Cloudflare Account ID** (found after `https://dash.cloudflare.com/`) from ➞ https://dash.cloudflare.com/?to=/:account/workers.
-3. Create your **API Token** from ➞ https://dash.cloudflare.com/profile/api-tokens with 3 permissions:
-   1. `Account.Zero Trust : Edit`
-   2. `Account.Account Firewall Access Rules : Edit`
-   3. `Account.Access: Apps and Policies : Edit`
 
-4. Add **Repository Secrets** to your forked repository:
-`➞ https://github.com/<username>/<forked-repository>/settings/secrets/actions`
-   1. Set **Cloudflare Account ID** to `CF_IDENTIFIER`.
-   2. Set **API Token** to `CF_API_TOKEN`.
+## Supported list formats
 
-### Schedule
----
-> Due to a limited 2-month commitment from GitHub Actions, you can create and paste this code to run on Cloudflare Workers. Remember, GitHub Tokens generate with no expiration and all permissions.
-
-```javascript
-addEventListener('scheduled', event => {
-  event.waitUntil(handleScheduledEvent());
-});
-
-async function handleScheduledEvent() {
-  const GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN_HERE';
-  try {
-    const dispatchResponse = await fetch('https://api.github.com/repos/YOUR_USER_NAME/YOUR_REPO_NAME/actions/workflows/main.yml/dispatches', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-      },
-      body: JSON.stringify({
-        ref: 'main'
-      }),
-    });
-
-    if (!dispatchResponse.ok) throw new Error('Failed to dispatch workflow');
-  } catch (error) {
-    console.error('Error handling scheduled event:', error);
-  }
-}
 ```
->> Remember to set up Cloudflare Workers triggers.
+# Plain URL
+https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+```
+```ini
+# INI format
+[Ad-Urls]
+Adguard = https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+```
 
-### How to set up using Termux?
+Supported domain list styles: hosts files, AdBlock/uBlock syntax, plain domain lists.
+
+> **Note:** Use **DNS filter lists**, not browser extension filter lists. Browser lists contain cosmetic rules that cause errors when used as DNS blocklists.
+
 ---
+
+## How to set up using Termux?
 
 To use this tool on the **GOAT** [Termux](https://github.com/termux/termux-app/releases/latest), follow the steps below. If you are already familiar with setting up Python and the basics, you can skip this section.
 
@@ -107,14 +144,13 @@ To use this tool on the **GOAT** [Termux](https://github.com/termux/termux-app/r
 yes | pkg upgrade
 yes | pkg install python-pip
 yes | pkg install git
-# Clone your forked repo #
-git clone https://github.com/<username>/<repo-name>.git
+git clone https://github.com/<username>/Cloudflare-Gateway-DNS-Filter.git
 ```
 
 2. Navigate to the cloned repository folder:
 
 ```sh
-cd <repo-name>
+cd Cloudflare-Gateway-DNS-Filter
 ```
 
 3. Edit the `.env` file (required):
@@ -134,7 +170,7 @@ python -m src run
 5. Run the command to delete your DNS list:
 
 ```sh
-python -m src leave 
+python -m src leave
 ```
 
 #### Method 2:
@@ -143,7 +179,7 @@ python -m src leave
 
 2. Unzip the downloaded file.
 
-3. Edit the values in `.env` and `adlist.ini` etc...
+3. Edit the values in `.env`, `lists/adlist.ini`, `lists/whitelist.ini` etc...
 
 4. Open Termux and enter the following commands to set up Python and necessary tools:
 
@@ -158,7 +194,7 @@ termux-setup-storage
 6. Navigate to the folder containing the unzipped source code:
 
 ```sh
-cd storage/downloads/Cloudflare-Gateway-Pihole-main
+cd storage/downloads/Cloudflare-Gateway-DNS-Filter-main
 ```
 
 7. Run the command to upload (update) your DNS list:
@@ -166,32 +202,37 @@ cd storage/downloads/Cloudflare-Gateway-Pihole-main
 ```sh
 python -m src run
 ```
+
 8. Run the command to delete your DNS list:
 
 ```sh
 python -m src leave
 ```
 
-
 If you encounter issues during setup, you can refer to [termux-change-repo](https://wiki.termux.com/wiki/Package_Management) for changing Termux repositories.
 
-### Note
 ---
-* The **limit** of `Cloudflare Gateway Zero Trust` free is **300k domains**, so remember to pay attention to the workflow logs. If it is exceeded, the script will stop.
 
-* If you have uploaded lists using another script, you should delete them using the delete feature of the uploaded script or delete them manually.
+## Note
 
-* I have updated the feature to delete lists when you no longer need to use the script. Go to [main.yml](.github/workflows/main.yml) as follows:
+* The **limit** of `Cloudflare Gateway Zero Trust` free is **300 lists** (block + allow combined), with 1,000 domains per list — up to **300,000 domains** total. The script stops automatically if this limit would be exceeded.
+
+* If you have uploaded lists using another script, you should delete them using the delete feature of that script or delete them manually.
+
+* To delete all lists and rules created by this script, go to [main.yml](.github/workflows/main.yml) and change the command:
 
 ```yml
-      - name: Cloudflare Gateway Zero Trust 
+      - name: Cloudflare Gateway Zero Trust
         run: python -m src leave
 ```
 
-Note from [@minlaxz](https://github.com/minlaxz):
-1. Domain list style: I personally preferred the second one in blacklist styles, which is more readable and concise.
-2. Dynamic domain list: You can also update your dynamic (fluid) whitelist and blacklist using [dynamic_blacklist.txt](./lists/dynamic_blacklist.txt) and [dynamic_whitelist.txt](./lists/dynamic_whitelist.txt).
-3. Deprecated using `.env`: Setting sensitive information inside a public repository is considered too dangerous, since any unwanted person could easily steal your Cloudflare credentials from that `.env` file.
+---
+
+## Credits
+
+> Thanks a lot to [@nhubaotruong](https://github.com/nhubaotruong) for his contributions.
+
+> Readme by [@minlaxz](https://github.com/minlaxz).
 
 🥂🥂 Cheers! 🍻🍻
 ===

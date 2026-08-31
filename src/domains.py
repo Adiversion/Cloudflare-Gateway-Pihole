@@ -1,20 +1,14 @@
 import os
-import http.client
-from urllib.parse import urlparse
 from configparser import ConfigParser
-from src import info, convert, silent_error
+from src import info, silent_error
+from src.convert import convert_to_block_list, convert_to_allow_list
+from src.requests import (
+    retry, retry_config, get_session,
+    HTTPException, RateLimitException, _parse_retry_after,
+)
 
-class DomainConverter:
-    def __init__(self):
-        self.env_file_map = {
-            "ADLIST_URLS": "./lists/adlist.ini",
-            "WHITELIST_URLS": "./lists/whitelist.ini",
-            "DYNAMIC_BLACKLIST": "./lists/dynamic_blacklist.txt",
-            "DYNAMIC_WHITELIST": "./lists/dynamic_whitelist.txt"
-        }
-        self.adlist_urls = self.read_urls("ADLIST_URLS")
-        self.whitelist_urls = self.read_urls("WHITELIST_URLS")
 
+class BaseDomainConverter:
     def read_urls_from_file(self, filename):
         urls = []
         try:
@@ -30,57 +24,95 @@ class DomainConverter:
                     url.strip() for url in file if not url.startswith("#") and url.strip()
                 ]
         return urls
-    
+
     def read_urls_from_env(self, env_var):
         urls = os.getenv(env_var, "")
-        return [
-            url.strip() for url in urls.split() if url.strip()
-        ]
+        return [url.strip() for url in urls.split() if url.strip()]
 
-    def read_urls(self, env_var):
-        file_path = self.env_file_map[env_var]
+    def read_urls(self, env_var, file_path):
         urls = self.read_urls_from_file(file_path)
         urls += self.read_urls_from_env(env_var)
         return urls
 
-    def download_file(self, url):
-        parsed_url = urlparse(url)
-        if parsed_url.scheme == "https":
-            conn = http.client.HTTPSConnection(parsed_url.netloc)
-        else:
-            conn = http.client.HTTPConnection(parsed_url.netloc)
-        conn.request("GET", parsed_url.path)
-        response = conn.getresponse()
-        if response.status != 200:
-            silent_error(f"Failed to download file from {url}, status code: {response.status}")
-        data = response.read().decode('utf-8')
-        conn.close()
-        info(f"Downloaded file from {url} File size: {len(data)}")
+    @retry(**retry_config)
+    def download_file(self, url, timeout: int = 15, max_redirects: int = 5):
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = get_session().request(
+            "GET", url, headers=headers, timeout=timeout,
+            follow_redirects=True, max_redirects=max_redirects,
+        )
+
+        if response.status_code != 200:
+            error_message = f"Failed to download file from {url}, status code: {response.status_code}"
+            silent_error(error_message)
+            if response.status_code == 429:
+                retry_after = _parse_retry_after(response.get_header("Retry-After"))
+                raise RateLimitException(error_message, retry_after=retry_after)
+            raise HTTPException(error_message)
+
+        data = response.text
+        info(f"Downloaded file from {url}. File size: {len(data)}")
         return data
-        
+
+
+
+class BlockDomainConverter(BaseDomainConverter):
+    """Processes adlists for block rules. Whitelist subtraction is NOT done here
+    because the Allow rule in Cloudflare Gateway takes precedence."""
+
+    def __init__(self):
+        self.adlist_urls = self.read_urls("ADLIST_URLS", "./lists/adlist.ini")
+        # Domains found in @@||... exception rules while processing the
+        # blocklists. The manager promotes these into the Allow list.
+        self.auto_whitelist_domains = set()
+
     def process_urls(self):
         block_content = ""
-        white_content = ""
         for url in self.adlist_urls:
             block_content += self.download_file(url)
-        for url in self.whitelist_urls:
-            white_content += self.download_file(url)
-        
-        # Check for dynamic blacklist and whitelist in environment variables
+
         dynamic_blacklist = os.getenv("DYNAMIC_BLACKLIST", "")
-        dynamic_whitelist = os.getenv("DYNAMIC_WHITELIST", "")
-        
         if dynamic_blacklist:
             block_content += dynamic_blacklist
         else:
-            with open(self.env_file_map["DYNAMIC_BLACKLIST"], "r") as black_file:
-                block_content += black_file.read()
-        
+            with open("./lists/dynamic_blacklist.txt", "r") as f:
+                block_content += f.read()
+
+        self.auto_whitelist_domains.clear()
+        domains = convert_to_block_list(
+            block_content,
+            exception_domains=self.auto_whitelist_domains,
+        )
+        info(
+            f"Number of auto-whitelisted exceptions: "
+            f"{len(self.auto_whitelist_domains)}"
+        )
+        return domains
+
+
+class AllowDomainConverter(BaseDomainConverter):
+    """Processes whitelists for allow rules."""
+
+    def __init__(self):
+        self.whitelist_urls = self.read_urls("WHITELIST_URLS", "./lists/whitelist.ini")
+
+    def process_urls(self, extra_domains=None):
+        white_content = ""
+        for url in self.whitelist_urls:
+            white_content += self.download_file(url)
+
+        dynamic_whitelist = os.getenv("DYNAMIC_WHITELIST", "")
         if dynamic_whitelist:
             white_content += dynamic_whitelist
         else:
-            with open(self.env_file_map["DYNAMIC_WHITELIST"], "r") as white_file:
-                white_content += white_file.read()
-        
-        domains = convert.convert_to_domain_list(block_content, white_content)
-        return domains
+            with open("./lists/dynamic_whitelist.txt", "r") as f:
+                white_content += f.read()
+
+        domains = set(convert_to_allow_list(white_content))
+        if extra_domains:
+            domains.update(extra_domains)
+            info(
+                f"Added {len(extra_domains)} auto-whitelisted "
+                f"@@|| exceptions to the Allow list"
+            )
+        return sorted(domains)

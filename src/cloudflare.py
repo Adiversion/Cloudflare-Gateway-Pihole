@@ -8,57 +8,58 @@ from src.requests import (
 @rate_limited_request
 def create_list(name, domains):
     endpoint = "/lists"
-    items = [{"value": domain} for domain in domains]
     data = {
         "name": name,
-        "description": "Ads & Tracking Domains",
+        "description": "Managed by Cloudflare-Gateway-DNS-Filter",
         "type": "DOMAIN",
-        "items": items
+        "items": [{"value": domain} for domain in domains]
     }
     status, response = cloudflare_gateway_request("POST", endpoint, body=json.dumps(data))
-    return response["result"]["id"]
+    return response["result"]
+
 
 @retry(**retry_config)
 @rate_limited_request
 def update_list(list_id, remove_items, append_items):
     endpoint = f"/lists/{list_id}"
-    
-    remove = [{"value": item} for item in remove_items]
-    append = [{"value": item} for item in append_items]
-    
     data = {
-        "remove": [item["value"] for item in remove],
-        "append": append
+        "remove": [domain for domain in remove_items],
+        "append": [{"value": domain} for domain in append_items]
     }
-    
     status, response = cloudflare_gateway_request("PATCH", endpoint, body=json.dumps(data))
     return response["result"]
 
-@retry(**retry_config)
-def create_rule(rule_name, list_ids):
-    endpoint = "/rules"
-    data = {
+
+def _rule_payload(rule_name, list_ids, action, priority, filters, traffic_field):
+    payload = {
         "name": rule_name,
-        "description": "Block Ads & Tracking",
-        "action": "block",
-        "traffic": " or ".join(f'any(dns.domains[*] in ${lst})' for lst in list_ids),
+        "description": f"Managed by Cloudflare-Gateway-DNS-Filter ({action})",
+        "action": action,
+        "precedence": priority,
+        "traffic": " or ".join(f'any({traffic_field}[*] in ${lst})' for lst in list_ids),
         "enabled": True,
     }
-    status, response = cloudflare_gateway_request("POST", endpoint, body=json.dumps(data))
-    return response["result"]["id"]
+    if filters:
+        payload["filters"] = filters
+    return payload
+
 
 @retry(**retry_config)
-def update_rule(rule_name, rule_id, list_ids):
+def create_rule(rule_name, list_ids, action="block", priority=1000,
+                 filters=None, traffic_field="dns.domains"):
+    data = _rule_payload(rule_name, list_ids, action, priority, filters, traffic_field)
+    status, response = cloudflare_gateway_request("POST", "/rules", body=json.dumps(data))
+    return response["result"]
+
+
+@retry(**retry_config)
+def update_rule(rule_name, rule_id, list_ids, action="block", priority=1000,
+                 filters=None, traffic_field="dns.domains"):
+    data = _rule_payload(rule_name, list_ids, action, priority, filters, traffic_field)
     endpoint = f"/rules/{rule_id}"
-    data = {
-        "name": rule_name,
-        "description": "Block Ads & Tracking",
-        "action": "block",
-        "traffic": " or ".join(f'any(dns.domains[*] in ${lst})' for lst in list_ids),
-        "enabled": True,
-    }
     status, response = cloudflare_gateway_request("PUT", endpoint, body=json.dumps(data))
-    return response["result"]["id"]
+    return response["result"]
+
 
 @retry(**retry_config)
 def get_lists(prefix_name):
@@ -66,11 +67,13 @@ def get_lists(prefix_name):
     lists = response["result"] or []
     return [l for l in lists if l["name"].startswith(prefix_name)]
 
+
 @retry(**retry_config)
 def get_rules(rule_name_prefix):
     status, response = cloudflare_gateway_request("GET", "/rules")
     rules = response["result"] or []
     return [r for r in rules if r["name"].startswith(rule_name_prefix)]
+
 
 @retry(**retry_config)
 @rate_limited_request
@@ -79,14 +82,17 @@ def delete_list(list_id):
     status, response = cloudflare_gateway_request("DELETE", endpoint)
     return response["result"]
 
+
 @retry(**retry_config)
 def delete_rule(rule_id):
     endpoint = f"/rules/{rule_id}"
     status, response = cloudflare_gateway_request("DELETE", endpoint)
     return response["result"]
 
+
 @retry(**retry_config)
 def get_list_items(list_id):
     endpoint = f"/lists/{list_id}/items?limit=1000"
     status, response = cloudflare_gateway_request("GET", endpoint)
-    return response["result"]
+    items = response["result"] or []
+    return [i["value"] for i in items]
