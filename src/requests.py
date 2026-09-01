@@ -32,14 +32,28 @@ CLOUDFLARE_HOST = "api.cloudflare.com"
 # Exceptions
 # ----------------------------------------------------------------------
 class HTTPException(Exception):
-    pass
+    """Detailed HTTP error with request context: method, URL, status,
+    reason, response headers, and body — the way http.client surfaces
+    errors at the call site."""
+
+    def __init__(self, message: str = "", *, method: str = "", url: str = "",
+                 status_code: int = 0, reason: str = "",
+                 headers=None, body: str = ""):
+        super().__init__(message)
+        self.method = method
+        self.url = url
+        self.status_code = status_code
+        self.reason = reason
+        self.headers = headers or {}
+        self.body = body
 
 class RateLimitException(HTTPException):
-    def __init__(self, message, retry_after: Optional[int] = None):
-        super().__init__(message)
-        # Seconds Cloudflare told us to wait (from the Retry-After header),
-        # when it gave us one. None means the caller falls back to a
-        # fixed default.
+    def __init__(self, message: str = "", *, retry_after: Optional[int] = None,
+                 method: str = "", url: str = "", status_code: int = 429,
+                 reason: str = "Too Many Requests", headers=None, body: str = ""):
+        super().__init__(message, method=method, url=url,
+                         status_code=status_code, reason=reason,
+                         headers=headers, body=body)
         self.retry_after = retry_after
 
 class NotFoundException(HTTPException):
@@ -185,7 +199,7 @@ class Session:
                 if attempt == 2:
                     message = f"Network error while requesting {method} {display_url}: {e}"
                     silent_error(message)
-                    raise HTTPException(message) from e
+                    raise HTTPException(message, method=method, url=display_url) from e
                 # else: loop once more on a freshly (re)opened connection
             except self._NETWORK_ERRORS as e:
                 # A connection that just failed like this shouldn't stay
@@ -193,7 +207,7 @@ class Session:
                 self._drop_connection(scheme, netloc)
                 message = f"Network error while requesting {method} {display_url}: {e}"
                 silent_error(message)
-                raise HTTPException(message) from e
+                raise HTTPException(message, method=method, url=display_url) from e
 
         raise HTTPException("Unreachable: Session._request_once retry loop exited without a result")
 
@@ -260,6 +274,7 @@ def cloudflare_gateway_request(
     response = get_session().request(method, url, body=body, headers=headers, timeout=timeout)
 
     if response.status_code >= 400:
+        resp_headers = {k: v for k, v in response._headers}
         error_message = (
             f"Request failed: {response.status_code} {response.reason}, "
             f"Body: {response.text} "
@@ -268,22 +283,35 @@ def cloudflare_gateway_request(
         if response.status_code == 429:
             retry_after = _parse_retry_after(response.get_header("Retry-After"))
             silent_error(error_message)
-            raise RateLimitException(error_message, retry_after=retry_after)
+            raise RateLimitException(
+                error_message, retry_after=retry_after,
+                method=method, url=url, status_code=429,
+                reason="Too Many Requests", headers=resp_headers,
+                body=response.text,
+            )
         elif response.status_code == 404:
             silent_error(error_message)
-            raise NotFoundException(error_message)
+            raise NotFoundException(
+                error_message, method=method, url=url, status_code=404,
+                reason="Not Found", headers=resp_headers,
+                body=response.text,
+            )
         elif response.status_code in (400, 403):
             error(error_message)
         else:
             silent_error(error_message)
-        raise HTTPException(error_message)
+        raise HTTPException(
+            error_message, method=method, url=url,
+            status_code=response.status_code, reason=response.reason,
+            headers=resp_headers, body=response.text,
+        )
 
     try:
         return response.status_code, response.json()
     except json.JSONDecodeError:
-        error_message = "Failed to decode JSON response"
+        error_message = f"Failed to decode JSON response from {method} {url}"
         silent_error(error_message)
-        raise HTTPException(error_message)
+        raise HTTPException(error_message, method=method, url=url)
 
 
 # ----------------------------------------------------------------------
