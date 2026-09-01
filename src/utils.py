@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import json
@@ -90,6 +91,59 @@ def get_list_items_cached(cache, list_id):
     cache["mapping"][list_id] = items
     save_cache(cache)
     return items
+
+
+def compute_domain_hash(domains):
+    """Deterministic hash of an iterable of domains. Used to detect whether
+    the desired domain set changed since the last successful run, so the
+    sync can be skipped entirely instead of diffing every list."""
+    return hashlib.sha256("\n".join(sorted(domains)).encode()).hexdigest()
+
+
+def get_cached_domain_state(cache, prefix):
+    """Return (hash, cached_domain_set) for a given list prefix."""
+    entry = cache.setdefault("domain_hashes", {}).get(prefix)
+    if entry is None:
+        return None, set()
+    return entry["hash"], set(entry["domains"])
+
+
+def set_cached_domain_state(cache, prefix, domains):
+    cache.setdefault("domain_hashes", {})[prefix] = {
+        "hash": compute_domain_hash(domains),
+        "domains": sorted(domains),
+    }
+
+def get_domain_diff(new_domains, cached_domains):
+    """Compute the exact add/remove sets between new and cached domains."""
+    new_set = set(new_domains)
+    to_add = new_set - cached_domains
+    to_remove = cached_domains - new_set
+    return to_add, to_remove
+
+
+def get_cached_reverse_mapping(cache, prefix):
+    """Return {domain: list_id} reverse mapping for a prefix."""
+    return cache.get("reverse_mappings", {}).get(prefix, {})
+
+
+def set_cached_reverse_mapping(cache, prefix, mapping):
+    """Store {domain: list_id} reverse mapping for a prefix."""
+    cache.setdefault("reverse_mappings", {})[prefix] = mapping
+
+
+def build_reverse_mapping(cache, list_ids, prefix):
+    """Build {domain: list_id} from the forward mapping (list_id -> [domains])
+    for lists belonging to the given prefix."""
+    rev = {}
+    mapping = cache.get("mapping", {})
+    cached_lists = cache.get("lists", [])
+    prefix_lists = {lst["id"] for lst in cached_lists if lst["name"].startswith(prefix)}
+    for lst_id in list_ids:
+        if lst_id in prefix_lists and lst_id in mapping:
+            for domain in mapping[lst_id]:
+                rev[domain] = lst_id
+    return rev
 
 
 def safe_sort_key(list_item):
