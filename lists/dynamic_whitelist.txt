@@ -1,4 +1,6 @@
 # connect.facebook.net
+static.cloudflareinsights.com
+challenges.cloudflare.com
 kwik.cx
 owocdn.top
 vault-99.owocdn.top
